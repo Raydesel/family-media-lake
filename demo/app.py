@@ -123,11 +123,7 @@ def inject_css() -> None:
     st.markdown(
         """
         <style>
-        /* Hide Streamlit chrome, but NOT the whole header — it holds the
-           sidebar expand/collapse control. Hiding header stranded users when
-           the sidebar was collapsed (only fix was clearing cookies). */
-        #MainMenu, footer {visibility: hidden;}
-        [data-testid="stToolbar"], .stDeployButton {display: none;}
+        /* Visual polish only — do not hide Streamlit header/sidebar controls. */
         .block-container {padding-top: 0.5rem; max-width: 935px;}
         .ig-title {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
@@ -209,91 +205,96 @@ def get_cached_photos(token: str) -> dict:
 
 # --- Components --------------------------------------------------------------
 
-def login_sidebar() -> str | None:
-    with st.sidebar:
-        st.markdown("### Family Photos")
-        st.caption("Sign in with your family account")
+def render_login() -> str | None:
+    """Sign-in form in the main page (avoids fragile sidebar collapse on Cloud)."""
+    _, center, _ = st.columns([1, 2, 1])
+    with center:
+        st.markdown("### Sign in")
+        st.caption("Use your family account")
+        email = st.text_input("Email", key="login_email")
+        password = st.text_input("Password", type="password", key="login_password")
+        if st.button("Log in", type="primary", use_container_width=True):
+            try:
+                st.session_state.token = cognito_login(email.strip(), password)
+                st.session_state.email = email.strip()
+                reset_page()
+                _invalidate_gallery_cache()
+                for k in list(st.session_state.keys()):
+                    if k.startswith("cached_years_"):
+                        del st.session_state[k]
+                st.rerun()
+            except RuntimeError as exc:
+                st.error(str(exc))
+    return None
 
-        if not st.session_state.get("token"):
-            email = st.text_input("Email", key="login_email")
-            password = st.text_input("Password", type="password", key="login_password")
-            if st.button("Log in", type="primary", use_container_width=True):
-                try:
-                    st.session_state.token = cognito_login(email.strip(), password)
-                    st.session_state.email = email.strip()
+
+def render_filter_panel() -> None:
+    """Browse filters — always on the main page inside an expander."""
+    with st.expander("Filters & account", expanded=True):
+        head_l, head_r = st.columns([3, 1])
+        with head_l:
+            st.markdown(f"Signed in as **{st.session_state.get('email', 'family')}**")
+        with head_r:
+            if st.button("Sign out", use_container_width=True):
+                for key in list(st.session_state.keys()):
+                    del st.session_state[key]
+                st.rerun()
+
+        f1, f2, f3 = st.columns(3)
+        with f1:
+            st.markdown("**Date filter**")
+            mode_label = st.radio(
+                "Show years for",
+                ["Photo taken (EXIF)", "Date uploaded"],
+                index=0 if st.session_state.date_mode == "capture" else 1,
+                label_visibility="collapsed",
+            )
+            new_mode = "capture" if mode_label.startswith("Photo") else "upload"
+            if new_mode != st.session_state.date_mode:
+                st.session_state.date_mode = new_mode
+                reset_page()
+                _invalidate_gallery_cache()
+                st.rerun()
+
+        with f2:
+            st.markdown("**Media type**")
+            media_labels = ["All", "Photos", "Videos"]
+            media_values = ["all", "photo", "video"]
+            media_index = media_values.index(st.session_state.media_filter)
+            media_label = st.radio(
+                "Show",
+                media_labels,
+                index=media_index,
+                label_visibility="collapsed",
+            )
+            new_media = media_values[media_labels.index(media_label)]
+            if new_media != st.session_state.media_filter:
+                st.session_state.media_filter = new_media
+                reset_page()
+                _invalidate_gallery_cache()
+                st.rerun()
+
+        with f3:
+            st.markdown("**Search by tag**")
+            st.caption("Beach, Dog, Birthday…")
+            tag_input = st.text_input("Tag", value=st.session_state.tag_input, label_visibility="collapsed")
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("Apply tag", use_container_width=True):
+                    st.session_state.tag = tag_input.strip()
+                    st.session_state.tag_input = tag_input
                     reset_page()
                     _invalidate_gallery_cache()
-                    for k in list(st.session_state.keys()):
-                        if k.startswith("cached_years_"):
-                            del st.session_state[k]
                     st.rerun()
-                except RuntimeError as exc:
-                    st.error(str(exc))
-            return None
-
-        st.success(f"Hi, {st.session_state.get('email', 'family')}!")
-        if st.button("Sign out", use_container_width=True):
-            for key in list(st.session_state.keys()):
-                del st.session_state[key]
-            st.rerun()
-
-        st.divider()
-        st.markdown("**Date filter**")
-        mode_label = st.radio(
-            "Show years for",
-            ["Photo taken (EXIF)", "Date uploaded"],
-            index=0 if st.session_state.date_mode == "capture" else 1,
-            label_visibility="collapsed",
-        )
-        new_mode = "capture" if mode_label.startswith("Photo") else "upload"
-        if new_mode != st.session_state.date_mode:
-            st.session_state.date_mode = new_mode
-            reset_page()
-            _invalidate_gallery_cache()
-            st.rerun()
-
-        st.divider()
-        st.markdown("**Media type**")
-        media_labels = ["All", "Photos", "Videos"]
-        media_values = ["all", "photo", "video"]
-        media_index = media_values.index(st.session_state.media_filter)
-        media_label = st.radio(
-            "Show",
-            media_labels,
-            index=media_index,
-            label_visibility="collapsed",
-        )
-        new_media = media_values[media_labels.index(media_label)]
-        if new_media != st.session_state.media_filter:
-            st.session_state.media_filter = new_media
-            reset_page()
-            _invalidate_gallery_cache()
-            st.rerun()
-
-        st.divider()
-        st.markdown("**Search by tag**")
-        st.caption("Examples: Beach, Dog, Birthday")
-        tag_input = st.text_input("Tag", value=st.session_state.tag_input, label_visibility="collapsed")
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("Apply", use_container_width=True):
-                st.session_state.tag = tag_input.strip()
-                st.session_state.tag_input = tag_input
-                reset_page()
-                _invalidate_gallery_cache()
-                st.rerun()
-        with c2:
-            if st.button("Clear", use_container_width=True):
-                st.session_state.tag = ""
-                st.session_state.tag_input = ""
-                reset_page()
-                _invalidate_gallery_cache()
-                st.rerun()
-
-        if st.session_state.tag:
-            st.info(f"Showing: **{st.session_state.tag}**")
-
-        return st.session_state.token
+            with c2:
+                if st.button("Clear tag", use_container_width=True):
+                    st.session_state.tag = ""
+                    st.session_state.tag_input = ""
+                    reset_page()
+                    _invalidate_gallery_cache()
+                    st.rerun()
+            if st.session_state.tag:
+                st.info(f"Tag: **{st.session_state.tag}**")
 
 
 def year_filter_bar(token: str) -> None:
@@ -407,7 +408,7 @@ def photo_grid(token: str, results: list[dict]) -> None:
 # --- Main --------------------------------------------------------------------
 
 def main() -> None:
-    st.set_page_config(page_title="Family Photos", page_icon="📷", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(page_title="Family Photos", page_icon="📷", layout="wide")
     inject_css()
     init_browse_state()
 
@@ -424,13 +425,14 @@ def main() -> None:
         st.error("Set SEARCH_API_URL (terraform output search_api_endpoint).")
         st.stop()
     if DEBUG:
-        st.sidebar.caption("🔧 Debug logging ON → watch the terminal")
+        st.caption("🔧 Debug logging ON")
 
-    token = login_sidebar()
+    token = st.session_state.get("token")
     if not token:
-        st.info("👋 Sign in on the left to see your photos.")
+        render_login()
         st.stop()
 
+    render_filter_panel()
     year_filter_bar(token)
 
     active_tag = st.session_state.tag
