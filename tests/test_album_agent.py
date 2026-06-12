@@ -60,7 +60,7 @@ def test_compact_item_with_decimals_and_gps():
     item = {
         "file_id": "f1",
         "capture_ts": "2026-06-07T09:30:00+00:00",
-        "uploader": "ariel",
+        "uploader": "family",
         "media_type": "photo",
         "rekognition_labels": ["Beach", "Person", "Sea", "Sky", "Sand", "Water", "Sun", "Cloud", "Extra9"],
         "face_cluster_ids": ["abcdef12-3456-7890-abcd-ef1234567890"],

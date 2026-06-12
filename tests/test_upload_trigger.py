@@ -63,11 +63,11 @@ def test_build_item_uses_head_metadata():
     head = {
         "ContentLength": 1234,
         "ContentType": "image/jpeg",
-        "Metadata": {"uploader": "ariel"},
+        "Metadata": {"uploader": "family"},
     }
     item = handler.build_item(parsed, head)
     assert item["file_id"] == "3f2504e0-4f89-41d3-9a0c-0305e82c3301"
-    assert item["uploader"] == "ariel"
+    assert item["uploader"] == "family"
     assert item["file_size_bytes"] == 1234
     assert item["media_type"] == "photo"
     assert item["status"] == "uploaded"

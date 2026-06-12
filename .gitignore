@@ -34,6 +34,19 @@ htmlcov/
 
 # Local env / secrets
 .env
+.env.*
+!.env.example
 *.local
 terraform/terraform.tfvars
 terraform/*.auto.tfvars
+terraform/backend.hcl
+demo/.streamlit/secrets.toml
+.streamlit/secrets.toml
+
+# AWS / keys (never commit)
+*.pem
+credentials
+.aws/credentials
+
+# Streamlit
+.streamlit/secrets.toml

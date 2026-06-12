@@ -13,14 +13,14 @@ curl command already includes it.
 Examples
 --------
     # Just print a URL + ready-to-run curl command:
-    python scripts/generate_upload_url.py photo.jpg --uploader ariel
+    python scripts/generate_upload_url.py photo.jpg --uploader family
 
     # Resolve the bucket automatically from terraform outputs:
-    python scripts/generate_upload_url.py photo.jpg --uploader ariel \
+    python scripts/generate_upload_url.py photo.jpg --uploader family \
         --bucket "$(terraform -chdir=terraform output -raw raw_bucket_name)"
 
     # Generate AND upload in one shot:
-    python scripts/generate_upload_url.py photo.jpg --uploader ariel --upload
+    python scripts/generate_upload_url.py photo.jpg --uploader family --upload
 """
 from __future__ import annotations
 

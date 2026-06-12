@@ -99,15 +99,17 @@ terraform output       # note state_bucket_name + lock_table_name
 
 ### 2. Point the root stack at that backend
 
-Edit `terraform/backend.tf` and replace `REPLACE_WITH_ACCOUNT_ID` with your
-account id (or pass `-backend-config=...` flags at init — see comments in the
-file).
+Keep `terraform/backend.tf` as-is (placeholders). For your account, copy
+`terraform/backend.hcl.example` → `terraform/backend.hcl` (gitignored), fill in
+your account id from bootstrap outputs, then init with that file (see below).
+Do **not** commit `backend.hcl` or `terraform.tfvars`.
 
 ### 3. Deploy the lake
 
 ```bash
 cd terraform
-terraform init         # migrates to the S3 backend
+cp backend.hcl.example backend.hcl   # once; edit account id — file is gitignored
+terraform init -backend-config=backend.hcl
 terraform plan
 terraform apply
 ```
@@ -124,7 +126,7 @@ upload-trigger function name.
 export RAW_BUCKET="$(terraform -chdir=terraform output -raw raw_bucket_name)"
 
 # Generate a URL and upload in one step:
-python scripts/generate_upload_url.py path/to/photo.jpg --uploader ariel --upload
+python scripts/generate_upload_url.py path/to/photo.jpg --uploader family --upload
 ```
 
 The S3 event fires `upload_trigger`, which writes a catalog item to DynamoDB.

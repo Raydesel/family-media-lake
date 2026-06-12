@@ -143,7 +143,7 @@ def _record(**overrides):
     base = {
         "file_id": "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
         "original_filename": "beach.jpg",
-        "uploader": "ariel",
+        "uploader": "family",
         "upload_ts": datetime(2026, 6, 8, 12, 0, tzinfo=timezone.utc),
         "capture_ts": datetime(2026, 6, 7, 9, 30, tzinfo=timezone.utc),
         "gps_lat": 40.4462,
@@ -249,7 +249,7 @@ def _stream_event(media_type="photo", status="uploaded", event_name="INSERT"):
                     "NewImage": {
                         "file_id": {"S": "3f2504e0-4f89-41d3-9a0c-0305e82c3301"},
                         "original_filename": {"S": "beach.jpg"},
-                        "uploader": {"S": "ariel"},
+                        "uploader": {"S": "family"},
                         "upload_ts": {"S": "2026-06-08T12:00:00+00:00"},
                         "year": {"N": "2026"},
                         "month": {"N": "6"},

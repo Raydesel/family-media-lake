@@ -4,13 +4,19 @@ Instagram-style family browser: photos load automatically (20 per page), year
 filter buttons, optional tag search, and one-tap original downloads.
 
 ```bash
+# Option A: environment variables
 export SEARCH_API_URL="$(terraform -chdir=terraform output -raw search_api_endpoint)"
 export COGNITO_CLIENT_ID="$(terraform -chdir=terraform output -raw cognito_client_id)"
 export AWS_REGION=us-east-1
 
+# Option B: copy demo/.streamlit/secrets.toml.example → secrets.toml (gitignored)
+
 pip install -r demo/requirements.txt
 streamlit run demo/app.py
 ```
+
+**Streamlit Community Cloud:** paste the same keys into the app Secrets UI.
+Never commit `secrets.toml`, API URLs, or AWS keys.
 
 ### Seeing logs / debugging
 

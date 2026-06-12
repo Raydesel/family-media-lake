@@ -29,7 +29,7 @@ def test_build_search_query_full_filters():
             "month": "6",
             "day": "10",
             "label": "Beach",
-            "uploader": "ariel",
+            "uploader": "family",
             "media_type": "photo",
             "page": "1",
             "page_size": "20",
@@ -39,7 +39,7 @@ def test_build_search_query_full_filters():
     assert "month = 6" in sql
     assert "day = 10" in sql
     assert "contains(rekognition_labels, 'Beach')" in sql
-    assert "uploader = 'ariel'" in sql
+    assert "uploader = 'family'" in sql
     assert "media_type = 'photo'" in sql
     assert page == 1 and page_size == 20
 
@@ -136,7 +136,7 @@ def test_catalog_matches_year_and_label():
     item = {
         "year": 2026,
         "month": 6,
-        "uploader": "ariel",
+        "uploader": "family",
         "rekognition_labels": ["Beach", "Person"],
         "media_type": "photo",
     }
@@ -227,7 +227,7 @@ class _FakeAthena:
                         "Data": [
                             {"VarCharValue": "3f2504e0-4f89-41d3-9a0c-0305e82c3301"},
                             {"VarCharValue": "beach.jpg"},
-                            {"VarCharValue": "ariel"},
+                            {"VarCharValue": "family"},
                             {"VarCharValue": "2026-06-10"},
                             {"VarCharValue": "2026-06-09"},
                             {"VarCharValue": "photo"},
