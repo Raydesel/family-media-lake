@@ -123,7 +123,11 @@ def inject_css() -> None:
     st.markdown(
         """
         <style>
-        #MainMenu, footer, header {visibility: hidden;}
+        /* Hide Streamlit chrome, but NOT the whole header — it holds the
+           sidebar expand/collapse control. Hiding header stranded users when
+           the sidebar was collapsed (only fix was clearing cookies). */
+        #MainMenu, footer {visibility: hidden;}
+        [data-testid="stToolbar"], .stDeployButton {display: none;}
         .block-container {padding-top: 0.5rem; max-width: 935px;}
         .ig-title {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
