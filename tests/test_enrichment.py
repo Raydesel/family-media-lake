@@ -74,6 +74,36 @@ def test_make_thumbnail_converts_rgba_png():
     assert Image.open(io.BytesIO(thumb)).mode == "RGB"
 
 
+# --- Video metadata -------------------------------------------------------------
+
+def test_parse_video_ts_iso_z():
+    ts = eh.parse_video_ts("2012-06-24T16:26:38.000000Z")
+    assert ts == datetime(2012, 6, 24, 16, 26, 38, tzinfo=timezone.utc)
+
+
+def test_parse_video_ts_garbage():
+    assert eh.parse_video_ts("") is None
+    assert eh.parse_video_ts(None) is None
+
+
+def test_parse_ffprobe_creation_time_from_format_tags():
+    payload = {
+        "format": {"tags": {"creation_time": "2012-06-24T16:26:38.000000Z"}},
+        "streams": [],
+    }
+    ts = eh.parse_ffprobe_creation_time(payload)
+    assert ts == datetime(2012, 6, 24, 16, 26, 38, tzinfo=timezone.utc)
+
+
+def test_parse_ffprobe_creation_time_falls_back_to_stream_tags():
+    payload = {
+        "format": {"tags": {}},
+        "streams": [{"tags": {"creation_time": "2014-01-15T10:00:00.000000Z"}}],
+    }
+    ts = eh.parse_ffprobe_creation_time(payload)
+    assert ts.year == 2014
+
+
 # --- Rekognition transforms -------------------------------------------------------
 
 def test_extract_labels():
@@ -177,6 +207,11 @@ class _FakeS3:
     def get_object(self, Bucket, Key):  # noqa: N803
         return {"Body": io.BytesIO(self.body)}
 
+    def download_file(self, Bucket, Key, Filename):  # noqa: N803
+        from pathlib import Path
+
+        Path(Filename).write_bytes(self.body)
+
     def put_object(self, **kwargs):
         self.put_calls.append(kwargs)
         return {}
@@ -262,16 +297,25 @@ def test_handler_photo_full_pipeline(fakes):
     assert "enriched" in values.values()
 
 
-def test_handler_video_skips_rekognition_and_thumbnail(fakes):
+def test_handler_video_extracts_capture_ts_and_poster(fakes, monkeypatch):
     s3, _, table = fakes
+    capture = datetime(2012, 6, 24, 16, 26, 38, tzinfo=timezone.utc)
+    monkeypatch.setattr(eh, "extract_video_creation_time", lambda _path: capture)
+    monkeypatch.setattr(eh, "extract_video_poster", lambda _path, max_px: _jpeg_bytes())
+
     result = eh.handler(_stream_event(media_type="video"), None)
     assert result == {"batchItemFailures": []}
 
     keys = [c["Key"] for c in s3.put_calls]
-    assert len(keys) == 1 and keys[0].endswith(".parquet")
-    row = pq.read_table(io.BytesIO(s3.put_calls[0]["Body"])).to_pylist()[0]
+    assert "thumbnails/year=2026/month=06/day=08/3f2504e0-4f89-41d3-9a0c-0305e82c3301.jpg" in keys
+    parquet_call = next(c for c in s3.put_calls if c["Key"].endswith(".parquet"))
+    row = pq.read_table(io.BytesIO(parquet_call["Body"])).to_pylist()[0]
     assert row["rekognition_labels"] == []
-    assert row["s3_thumbnail_key"] is None
+    assert row["capture_ts"] == capture
+    assert row["s3_thumbnail_key"] is not None
+
+    values = table.updates[0]["ExpressionAttributeValues"]
+    assert capture.isoformat() in {v for v in values.values() if isinstance(v, str)}
 
 
 def test_handler_ignores_non_insert_and_wrong_status(fakes):

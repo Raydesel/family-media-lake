@@ -92,7 +92,9 @@ def api_get(token: str, path: str, params: dict | None = None) -> dict:
     return resp.json()
 
 
-def fetch_photos(token: str, page: int, year: str, tag: str, when: str) -> dict:
+def fetch_photos(
+    token: str, page: int, year: str, tag: str, when: str, media_type: str
+) -> dict:
     params: dict[str, str | int] = {
         "page": page,
         "page_size": PAGE_SIZE,
@@ -101,6 +103,8 @@ def fetch_photos(token: str, page: int, year: str, tag: str, when: str) -> dict:
     }
     if tag.strip():
         params["label"] = tag.strip()
+    if media_type in ("photo", "video"):
+        params["media_type"] = media_type
     return api_get(token, "/search", params)
 
 
@@ -146,6 +150,8 @@ def init_browse_state() -> None:
         "tag_input": "",
         # capture = EXIF date taken; upload = date added to the lake
         "date_mode": "capture",
+        # all | photo | video
+        "media_filter": "all",
     }
     for key, val in defaults.items():
         st.session_state.setdefault(key, val)
@@ -156,7 +162,13 @@ def reset_page() -> None:
 
 
 def _gallery_cache_key() -> tuple:
-    return (st.session_state.page, st.session_state.year, st.session_state.tag, st.session_state.date_mode)
+    return (
+        st.session_state.page,
+        st.session_state.year,
+        st.session_state.tag,
+        st.session_state.date_mode,
+        st.session_state.media_filter,
+    )
 
 
 def _invalidate_gallery_cache() -> None:
@@ -175,7 +187,7 @@ def get_cached_years(token: str, when: str) -> list[int]:
 
 
 def get_cached_photos(token: str) -> dict:
-    """Only hit /search when page, year, tag, or date_mode changes."""
+    """Only hit /search when browse filters or page change."""
     key = _gallery_cache_key()
     if st.session_state.get("_gallery_key") != key:
         with st.spinner("Loading photos…"):
@@ -185,18 +197,10 @@ def get_cached_photos(token: str) -> dict:
                 st.session_state.year,
                 st.session_state.tag,
                 st.session_state.date_mode,
+                st.session_state.media_filter,
             )
             st.session_state._gallery_key = key
     return st.session_state._gallery_data
-
-
-def _prepare_download(file_id: str) -> None:
-    """Button callback: fetch presigned URL without reloading the photo grid."""
-    try:
-        st.session_state[f"download_{file_id}"] = fetch_download_url(st.session_state.token, file_id)
-        st.session_state.pop("_download_error", None)
-    except RuntimeError as exc:
-        st.session_state["_download_error"] = str(exc)
 
 
 # --- Components --------------------------------------------------------------
@@ -240,6 +244,24 @@ def login_sidebar() -> str | None:
         new_mode = "capture" if mode_label.startswith("Photo") else "upload"
         if new_mode != st.session_state.date_mode:
             st.session_state.date_mode = new_mode
+            reset_page()
+            _invalidate_gallery_cache()
+            st.rerun()
+
+        st.divider()
+        st.markdown("**Media type**")
+        media_labels = ["All", "Photos", "Videos"]
+        media_values = ["all", "photo", "video"]
+        media_index = media_values.index(st.session_state.media_filter)
+        media_label = st.radio(
+            "Show",
+            media_labels,
+            index=media_index,
+            label_visibility="collapsed",
+        )
+        new_media = media_values[media_labels.index(media_label)]
+        if new_media != st.session_state.media_filter:
+            st.session_state.media_filter = new_media
             reset_page()
             _invalidate_gallery_cache()
             st.rerun()
@@ -324,25 +346,32 @@ def photo_card(token: str, item: dict, col) -> None:
                         _invalidate_gallery_cache()
                         st.rerun()
 
-        dl_key = f"download_{file_id}"
-        dl = st.session_state.get(dl_key)
-        if dl and dl.get("download_url"):
-            # One tap: opens presigned URL (S3 sends Content-Disposition: attachment).
+        download_url = item.get("download_url")
+        if download_url:
             st.link_button(
                 "⬇ Save original",
-                dl["download_url"],
+                download_url,
                 use_container_width=True,
-                help=f"Save {dl.get('filename', 'photo')}",
+                help=f"Save {name}",
             )
         else:
-            st.button(
+            # Fallback when search API predates download_url in results.
+            if st.button(
                 "⬇ Save original",
                 key=f"btn_{file_id}",
                 use_container_width=True,
-                on_click=_prepare_download,
-                args=(file_id,),
-                help="Prepares a secure download link (~10s)",
-            )
+                help="Fetch download link",
+            ):
+                try:
+                    dl = fetch_download_url(token, file_id)
+                    st.link_button(
+                        "⬇ Save original",
+                        dl["download_url"],
+                        use_container_width=True,
+                        help=f"Save {dl.get('filename', name)}",
+                    )
+                except RuntimeError as exc:
+                    st.error(str(exc))
 
 
 def pagination_bar(has_more: bool) -> None:
@@ -402,15 +431,14 @@ def main() -> None:
 
     active_tag = st.session_state.tag
     when_label = "taken" if st.session_state.date_mode == "capture" else "uploaded"
-    subtitle = f"All photos ({when_label})"
+    media_labels = {"all": "media", "photo": "photos", "video": "videos"}
+    media_word = media_labels[st.session_state.media_filter]
+    subtitle = f"All {media_word} ({when_label})"
     if st.session_state.year != "all":
-        subtitle = f"Photos {when_label} in {st.session_state.year}"
+        subtitle = f"{media_word.capitalize()} {when_label} in {st.session_state.year}"
     if active_tag:
         subtitle += f' tagged "{active_tag}"'
     st.markdown(f"**{subtitle}** · page {st.session_state.page}")
-
-    if err := st.session_state.pop("_download_error", None):
-        st.error(f"Download failed: {err}")
 
     try:
         data = get_cached_photos(token)
@@ -420,7 +448,7 @@ def main() -> None:
 
     results = data.get("results") or []
     if not results:
-        st.warning("No photos here yet. Try **All years** or clear the tag filter.")
+        st.warning("Nothing here yet. Try **All years**, **All** media type, or clear the tag filter.")
         if st.session_state.page > 1:
             st.session_state.page = 1
             st.rerun()

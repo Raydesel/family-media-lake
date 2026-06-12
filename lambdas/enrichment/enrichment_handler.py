@@ -6,12 +6,14 @@ upload_trigger). For each new media item:
   1. Photos: download original, extract EXIF (capture_ts + GPS) with Pillow.
   2. Photos: generate a JPEG thumbnail -> processed bucket.
   3. Photos: Rekognition DetectLabels + DetectFaces (by S3 reference, no
-     re-upload). Videos skip Rekognition (video APIs are async + pricier;
-     deferred to a later phase).
-  4. All media: write a one-row Parquet file with the full metadata schema to
+     re-upload).
+  4. Videos: ffprobe reads container creation_time -> capture_ts; ffmpeg
+     extracts a poster frame JPEG thumbnail. Rekognition on full video is still
+     deferred (async video APIs).
+  5. All media: write a one-row Parquet file with the full metadata schema to
      processed/metadata/year=.../month=.../day=.../<uuid>.parquet (the Glue
      table over this prefix uses partition projection, so no crawler runs).
-  5. Update the catalog item: status=enriched + denormalized highlights.
+  6. Update the catalog item: status=enriched + denormalized highlights.
 
 Handler pattern: validate event -> log -> business logic -> return response.
 Partial-batch failures are reported back to the stream so only failed records
@@ -22,10 +24,12 @@ from __future__ import annotations
 import io
 import json
 import os
+import subprocess
 import sys
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import boto3
@@ -176,6 +180,144 @@ def extract_exif(data: bytes) -> dict[str, Any]:
 
 # --- Thumbnail ----------------------------------------------------------------
 
+# --- Video metadata (ffmpeg/ffprobe, bundled under bin/ in the deployment) ----
+
+_BIN_DIR = Path(__file__).resolve().parent / "bin"
+_CREATION_TIME_TAGS = (
+    "creation_time",
+    "com.apple.quicktime.creationdate",
+    "date",
+    "DATE",
+)
+
+
+def _tool_path(name: str) -> str:
+    """Resolve ffmpeg/ffprobe: env override, bundled binary, then PATH."""
+    env_key = f"{name.upper()}_PATH"
+    override = os.environ.get(env_key)
+    if override:
+        return override
+    bundled = _BIN_DIR / name
+    if bundled.is_file():
+        return str(bundled)
+    return name
+
+
+def parse_video_ts(value: Any) -> datetime | None:
+    """Parse ISO-8601 timestamps from MP4/MOV container tags."""
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def parse_ffprobe_creation_time(payload: dict[str, Any]) -> datetime | None:
+    """Pick the first usable creation timestamp from ffprobe JSON."""
+    format_tags = (payload.get("format") or {}).get("tags") or {}
+    for key in _CREATION_TIME_TAGS:
+        ts = parse_video_ts(format_tags.get(key))
+        if ts:
+            return ts
+    for stream in payload.get("streams") or []:
+        stream_tags = stream.get("tags") or {}
+        for key in _CREATION_TIME_TAGS:
+            ts = parse_video_ts(stream_tags.get(key))
+            if ts:
+                return ts
+    return None
+
+
+def extract_video_creation_time(path: str | Path) -> datetime | None:
+    """Read container creation_time via ffprobe."""
+    cmd = [
+        _tool_path("ffprobe"),
+        "-v",
+        "error",
+        "-show_entries",
+        "format_tags=creation_time:stream_tags=creation_time",
+        "-of",
+        "json",
+        str(path),
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, check=False, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        warning("ffprobe failed", path=str(path), error=str(exc))
+        return None
+    if proc.returncode != 0:
+        warning(
+            "ffprobe non-zero exit",
+            path=str(path),
+            stderr=proc.stderr.decode(errors="replace")[:500],
+        )
+        return None
+    try:
+        payload = json.loads(proc.stdout.decode() or "{}")
+    except json.JSONDecodeError:
+        warning("ffprobe returned invalid json", path=str(path))
+        return None
+    return parse_ffprobe_creation_time(payload)
+
+
+def extract_video_poster(path: str | Path, max_px: int = 512) -> bytes:
+    """Grab the first frame and return a JPEG poster (scaled to max_px)."""
+    scale = f"scale='min({max_px},iw)':-2"
+    cmd = [
+        _tool_path("ffmpeg"),
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-ss",
+        "0",
+        "-i",
+        str(path),
+        "-frames:v",
+        "1",
+        "-vf",
+        scale,
+        "-f",
+        "image2pipe",
+        "-vcodec",
+        "mjpeg",
+        "pipe:1",
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, check=False, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"ffmpeg poster extraction failed: {exc}") from exc
+    if proc.returncode != 0 or not proc.stdout:
+        stderr = proc.stderr.decode(errors="replace")[:500]
+        raise RuntimeError(f"ffmpeg exited {proc.returncode}: {stderr}")
+    return proc.stdout
+
+
+def _download_raw_to_tmp(raw_key: str, file_id: str) -> Path:
+    suffix = Path(raw_key).suffix or ".bin"
+    path = Path("/tmp") / f"{file_id}{suffix}"
+    _s3.download_file(RAW_BUCKET, raw_key, str(path))
+    return path
+
+
+def _upload_thumbnail(
+    thumb: bytes, year: int, month: int, day: int, file_id: str
+) -> str:
+    thumbnail_key = f"thumbnails/{partition_prefix(year, month, day)}/{file_id}.jpg"
+    _s3.put_object(
+        Bucket=PROCESSED_BUCKET,
+        Key=thumbnail_key,
+        Body=thumb,
+        ContentType="image/jpeg",
+    )
+    return thumbnail_key
+
+
 def make_thumbnail(data: bytes, max_px: int = 512) -> bytes:
     """Downscale to a JPEG thumbnail, honoring EXIF orientation."""
     img = Image.open(io.BytesIO(data))
@@ -294,19 +436,30 @@ def process_item(item: dict[str, Any]) -> dict[str, Any]:
         exif = extract_exif(body)
         try:
             thumb = make_thumbnail(body, THUMBNAIL_MAX_PX)
-            thumbnail_key = f"thumbnails/{partition_prefix(year, month, day)}/{file_id}.jpg"
-            _s3.put_object(
-                Bucket=PROCESSED_BUCKET,
-                Key=thumbnail_key,
-                Body=thumb,
-                ContentType="image/jpeg",
-            )
+            thumbnail_key = _upload_thumbnail(thumb, year, month, day, file_id)
         except Exception as exc:
             warning("thumbnail generation failed", file_id=file_id, error=str(exc))
             thumbnail_key = None
         labels, faces = run_rekognition(raw_key, file_id)
-    # Videos: Rekognition's video APIs are async (Start*/Get* + SNS) and
-    # billed per minute -- deferred. Metadata parquet is still written.
+    elif media_type == "video":
+        tmp_path: Path | None = None
+        try:
+            tmp_path = _download_raw_to_tmp(raw_key, file_id)
+            capture_ts = extract_video_creation_time(tmp_path)
+            if capture_ts:
+                exif["capture_ts"] = capture_ts
+            try:
+                poster = extract_video_poster(tmp_path, THUMBNAIL_MAX_PX)
+                thumb = make_thumbnail(poster, THUMBNAIL_MAX_PX)
+                thumbnail_key = _upload_thumbnail(thumb, year, month, day, file_id)
+            except Exception as exc:
+                warning("video poster failed", file_id=file_id, error=str(exc))
+                thumbnail_key = None
+        except Exception as exc:
+            warning("video enrichment failed", file_id=file_id, error=str(exc))
+        finally:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
 
     record = {
         "file_id": file_id,

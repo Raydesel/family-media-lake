@@ -12,7 +12,8 @@ locals {
   function_name = "${var.project_name}-enrichment"
   source_dir    = abspath("${path.module}/../../../lambdas/enrichment")
   build_dir     = "${path.module}/build/pkg"
-  build_script  = abspath("${path.module}/../../../scripts/build_lambda_package.sh")
+  build_script   = abspath("${path.module}/../../../scripts/build_lambda_package.sh")
+  fetch_ffmpeg   = abspath("${path.module}/../../../scripts/fetch_ffmpeg.sh")
 
   glue_database_name = replace(var.project_name, "-", "_")
   glue_table_name    = "media_metadata"
@@ -26,13 +27,14 @@ locals {
 #   terraform apply -replace=module.enrichment.null_resource.build
 resource "null_resource" "build" {
   triggers = {
-    requirements = filemd5("${local.source_dir}/requirements.txt")
-    source       = filemd5("${local.source_dir}/enrichment_handler.py")
-    script       = filemd5(local.build_script)
+    requirements   = filemd5("${local.source_dir}/requirements.txt")
+    source         = filemd5("${local.source_dir}/enrichment_handler.py")
+    script         = filemd5(local.build_script)
+    fetch_ffmpeg   = filemd5(local.fetch_ffmpeg)
   }
 
   provisioner "local-exec" {
-    command = "bash '${local.build_script}' '${local.source_dir}' '${abspath(local.build_dir)}'"
+    command = "bash '${local.build_script}' '${local.source_dir}' '${abspath(local.build_dir)}' && bash '${local.fetch_ffmpeg}' '${abspath(local.build_dir)}/bin'"
   }
 }
 
@@ -143,8 +145,12 @@ resource "aws_lambda_function" "enrichment" {
   handler       = "enrichment_handler.handler"
   runtime       = "python3.11"
   architectures = ["arm64"] # build script installs aarch64 wheels
-  timeout       = 120
-  memory_size   = 1024 # Pillow decoding of large photos needs headroom
+  timeout       = 180
+  memory_size   = 1536 # Pillow + ffmpeg frame extraction for videos
+
+  ephemeral_storage {
+    size = 1024 # /tmp space for downloaded originals before ffmpeg runs
+  }
 
   s3_bucket        = aws_s3_object.enrichment_zip.bucket
   s3_key           = aws_s3_object.enrichment_zip.key

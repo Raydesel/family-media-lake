@@ -76,6 +76,25 @@ def test_parse_label_array():
     assert search._parse_label_array("[]") == []
 
 
+def test_enrich_rows_adds_thumbnail_and_download_url(monkeypatch):
+    monkeypatch.setattr(
+        search,
+        "build_presigned_download_url",
+        lambda raw_key, filename: f"https://signed.example/{raw_key}",
+    )
+    rows = search.enrich_rows(
+        [
+            {
+                "s3_thumbnail_key": "thumbnails/year=2026/month=06/day=10/x.jpg",
+                "s3_raw_key": "raw/year=2026/month=06/day=10/x.jpg",
+                "original_filename": "beach.jpg",
+            }
+        ]
+    )
+    assert rows[0]["thumbnail_url"].endswith("thumbnails/year=2026/month=06/day=10/x.jpg")
+    assert rows[0]["download_url"] == "https://signed.example/raw/year=2026/month=06/day=10/x.jpg"
+
+
 def test_rows_from_results():
     result = {
         "ResultSet": {

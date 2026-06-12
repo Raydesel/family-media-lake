@@ -282,11 +282,31 @@ def _parse_label_array(raw: str | None) -> list[str]:
     return [text]
 
 
+def build_presigned_download_url(raw_key: str | None, filename: str | None) -> str | None:
+    """Presigned GET with Content-Disposition so the browser saves the file."""
+    if not raw_key:
+        return None
+    name = filename or raw_key.rsplit("/", 1)[-1]
+    return _s3.generate_presigned_url(
+        ClientMethod="get_object",
+        Params={
+            "Bucket": RAW_BUCKET,
+            "Key": raw_key,
+            "ResponseContentDisposition": f'attachment; filename="{quote(name)}"',
+        },
+        ExpiresIn=DOWNLOAD_URL_TTL,
+    )
+
+
 def enrich_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     enriched = []
     for row in rows:
         item = dict(row)
         item["thumbnail_url"] = thumbnail_url(item.get("s3_thumbnail_key"))
+        item["download_url"] = build_presigned_download_url(
+            item.get("s3_raw_key"),
+            item.get("original_filename"),
+        )
         if isinstance(item.get("rekognition_labels"), str):
             item["rekognition_labels"] = _parse_label_array(item["rekognition_labels"])
         enriched.append(item)
@@ -522,16 +542,9 @@ def presigned_download(file_id: str) -> dict[str, Any]:
         raise LookupError("original file not available")
 
     filename = row.get("original_filename") or f"{file_id}.jpg"
-    # attachment disposition prompts the browser to save instead of inline-preview.
-    url = _s3.generate_presigned_url(
-        ClientMethod="get_object",
-        Params={
-            "Bucket": RAW_BUCKET,
-            "Key": raw_key,
-            "ResponseContentDisposition": f'attachment; filename="{quote(filename)}"',
-        },
-        ExpiresIn=DOWNLOAD_URL_TTL,
-    )
+    url = build_presigned_download_url(raw_key, filename)
+    if not url:
+        raise LookupError("original file not available")
     return {
         "file_id": file_id,
         "filename": filename,
