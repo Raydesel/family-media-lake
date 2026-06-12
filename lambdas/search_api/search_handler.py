@@ -11,8 +11,10 @@ Routes:
   GET /download        — presigned URL for the original file (requires Cognito JWT)
 
 Search query parameters:
-  year                 — YYYY, or "all" (default) for every projected year
-  month, day           — optional partition predicates
+  when                 — upload (default) | capture — whether year/month/day
+                         filter on upload partition or EXIF capture_ts
+  year                 — YYYY, or "all" for every matching year
+  month, day           — optional; apply to upload partition or capture_ts
   label / q            — Rekognition label (contains)
   uploader             — exact uploader name
   media_type           — photo | video
@@ -60,6 +62,7 @@ _catalog_cache: tuple[float, list[dict[str, Any]]] | None = None
 _UPLOADER_RE = re.compile(r"^[a-zA-Z0-9._ -]{1,64}$")
 _LABEL_RE = re.compile(r"^[a-zA-Z0-9 ,._'-]{1,80}$")
 _MEDIA_TYPES = {"photo", "video"}
+_WHEN_MODES = {"upload", "capture"}
 _UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
@@ -129,6 +132,26 @@ def _parse_int(name: str, raw: str | None, lo: int, hi: int) -> int | None:
     return value
 
 
+def _parse_when(params: dict[str, str | None]) -> str:
+    when = (params.get("when") or "upload").strip().lower()
+    if when not in _WHEN_MODES:
+        raise ValueError("when must be upload or capture")
+    return when
+
+
+def _capture_date_parts(capture_ts: Any) -> tuple[int, int, int] | None:
+    """Parse (year, month, day) from catalog/Athena capture_ts strings."""
+    if not capture_ts:
+        return None
+    text = str(capture_ts).strip()
+    if len(text) < 10 or text[4] != "-" or text[7] != "-":
+        return None
+    try:
+        return int(text[0:4]), int(text[5:7]), int(text[8:10])
+    except ValueError:
+        return None
+
+
 def _year_clause(params: dict[str, str | None]) -> str:
     year_raw = (params.get("year") or "all").strip().lower()
     if year_raw in ("all", "*", ""):
@@ -140,14 +163,31 @@ def _year_clause(params: dict[str, str | None]) -> str:
 
 
 def _filter_clauses(params: dict[str, str | None]) -> list[str]:
-    clauses = [_year_clause(params)]
-
+    when = _parse_when(params)
     month = _parse_int("month", params.get("month"), 1, 12)
     day = _parse_int("day", params.get("day"), 1, 31)
-    if month is not None:
-        clauses.append(f"month = {month}")
-    if day is not None:
-        clauses.append(f"day = {day}")
+
+    if when == "capture":
+        # capture_ts lives across upload partitions — scan all, filter in SQL.
+        clauses = [
+            f"year BETWEEN {YEAR_MIN} AND {YEAR_MAX}",
+            "capture_ts IS NOT NULL",
+        ]
+        year_raw = (params.get("year") or "all").strip().lower()
+        if year_raw not in ("all", "*", ""):
+            year = _parse_int("year", params.get("year"), YEAR_MIN, YEAR_MAX)
+            if year is not None:
+                clauses.append(f"year(capture_ts) = {year}")
+        if month is not None:
+            clauses.append(f"month(capture_ts) = {month}")
+        if day is not None:
+            clauses.append(f"day(capture_ts) = {day}")
+    else:
+        clauses = [_year_clause(params)]
+        if month is not None:
+            clauses.append(f"month = {month}")
+        if day is not None:
+            clauses.append(f"day = {day}")
 
     uploader = (params.get("uploader") or "").strip()
     if uploader:
@@ -187,7 +227,13 @@ def build_search_query(params: dict[str, str | None]) -> tuple[str, int, int]:
     return sql, page, page_size
 
 
-def build_years_query() -> str:
+def build_years_query(when: str = "upload") -> str:
+    if when == "capture":
+        return (
+            f"SELECT DISTINCT year(capture_ts) AS year FROM {_glue_table()} "
+            f"WHERE year BETWEEN {YEAR_MIN} AND {YEAR_MAX} AND capture_ts IS NOT NULL "
+            "ORDER BY year DESC"
+        )
     return (
         f"SELECT DISTINCT year FROM {_glue_table()} "
         f"WHERE year BETWEEN {YEAR_MIN} AND {YEAR_MAX} "
@@ -280,18 +326,30 @@ def _catalog_sort_key(item: dict[str, Any]) -> str:
 
 
 def _catalog_matches(item: dict[str, Any], params: dict[str, str | None]) -> bool:
+    when = _parse_when(params)
     year_raw = (params.get("year") or "all").strip().lower()
-    if year_raw not in ("all", "*", ""):
-        if int(item.get("year", -1)) != int(year_raw):
-            return False
-
     month = _parse_int("month", params.get("month"), 1, 12)
-    if month is not None and int(item.get("month", -1)) != month:
-        return False
-
     day = _parse_int("day", params.get("day"), 1, 31)
-    if day is not None and int(item.get("day", -1)) != day:
-        return False
+
+    if when == "capture":
+        parts = _capture_date_parts(item.get("capture_ts"))
+        if parts is None:
+            return False
+        y, m, d = parts
+        if year_raw not in ("all", "*", "") and y != int(year_raw):
+            return False
+        if month is not None and m != month:
+            return False
+        if day is not None and d != day:
+            return False
+    else:
+        if year_raw not in ("all", "*", ""):
+            if int(item.get("year", -1)) != int(year_raw):
+                return False
+        if month is not None and int(item.get("month", -1)) != month:
+            return False
+        if day is not None and int(item.get("day", -1)) != day:
+            return False
 
     uploader = (params.get("uploader") or "").strip()
     if uploader and item.get("uploader") != uploader:
@@ -338,6 +396,7 @@ def _scan_enriched_catalog() -> list[dict[str, Any]]:
 def catalog_search(params: dict[str, str | None]) -> dict[str, Any]:
     page = _parse_int("page", params.get("page"), 1, 10_000) or 1
     page_size = _parse_int("page_size", params.get("page_size"), 1, MAX_PAGE_SIZE) or DEFAULT_PAGE_SIZE
+    _parse_when(params)  # validate early
 
     uploader = (params.get("uploader") or "").strip()
     if uploader and not _UPLOADER_RE.match(uploader):
@@ -363,12 +422,25 @@ def catalog_search(params: dict[str, str | None]) -> dict[str, Any]:
         "has_more": has_more,
         "results": rows,
         "source": "dynamodb",
+        "when": _parse_when(params),
     }
 
 
-def catalog_list_years() -> dict[str, Any]:
-    years = sorted({int(i["year"]) for i in _scan_enriched_catalog() if i.get("year") is not None}, reverse=True)
-    return {"years": years, "source": "dynamodb"}
+def catalog_list_years(when: str = "upload") -> dict[str, Any]:
+    items = _scan_enriched_catalog()
+    if when == "capture":
+        years: set[int] = set()
+        for item in items:
+            parts = _capture_date_parts(item.get("capture_ts"))
+            if parts:
+                years.add(parts[0])
+    else:
+        years = {int(i["year"]) for i in items if i.get("year") is not None}
+    return {
+        "years": sorted(years, reverse=True),
+        "source": "dynamodb",
+        "when": when,
+    }
 
 
 def catalog_get_item(file_id: str) -> dict[str, Any]:
@@ -419,15 +491,18 @@ def search(params: dict[str, str | None]) -> dict[str, Any]:
         "has_more": has_more,
         "results": rows,
         "source": "athena",
+        "when": _parse_when(params),
     }
 
 
-def list_years() -> dict[str, Any]:
+def list_years(params: dict[str, str | None] | None = None) -> dict[str, Any]:
+    params = params or {}
+    when = _parse_when(params)
     if BROWSE_BACKEND == "dynamodb":
-        return catalog_list_years()
-    rows = run_athena_query(build_years_query())
+        return catalog_list_years(when)
+    rows = run_athena_query(build_years_query(when))
     years = [int(r["year"]) for r in rows if r.get("year")]
-    return {"years": years, "source": "athena"}
+    return {"years": years, "source": "athena", "when": when}
 
 
 def presigned_download(file_id: str) -> dict[str, Any]:
@@ -493,8 +568,8 @@ def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
             return api_response(200, payload)
 
         if path == "/years":
-            info("years request", caller_sub=caller)
-            return api_response(200, list_years())
+            info("years request", caller_sub=caller, params=params)
+            return api_response(200, list_years(params))
 
         if path == "/download":
             file_id = (params.get("file_id") or "").strip()

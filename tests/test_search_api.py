@@ -126,6 +126,31 @@ def test_catalog_matches_year_and_label():
     assert not search._catalog_matches(item, {"year": "2026", "label": "Dog"})
 
 
+def test_capture_date_parts():
+    assert search._capture_date_parts("2014-02-05T13:24:58.000") == (2014, 2, 5)
+    assert search._capture_date_parts("2014-02-05 13:24:58") == (2014, 2, 5)
+    assert search._capture_date_parts(None) is None
+
+
+def test_catalog_matches_capture_year_not_upload_year():
+    # Uploaded 2026 but taken in 2014 (common for old camera imports).
+    item = {
+        "year": 2026,
+        "month": 6,
+        "capture_ts": "2014-02-05T13:24:58.000",
+    }
+    assert search._catalog_matches(item, {"when": "capture", "year": "2014"})
+    assert not search._catalog_matches(item, {"when": "capture", "year": "2026"})
+    assert search._catalog_matches(item, {"when": "upload", "year": "2026"})
+    assert not search._catalog_matches(item, {"when": "upload", "year": "2014"})
+
+
+def test_build_search_query_capture_year():
+    sql, _, _ = search.build_search_query({"when": "capture", "year": "2014"})
+    assert "year(capture_ts) = 2014" in sql
+    assert "capture_ts IS NOT NULL" in sql
+
+
 def test_catalog_search_pagination(monkeypatch):
     items = [
         {
@@ -227,9 +252,12 @@ def test_handler_years(monkeypatch):
     event = {
         "rawPath": "/years",
         "requestContext": {"http": {"method": "GET"}, "authorizer": {"jwt": {"claims": {"sub": "u"}}}},
+        "queryStringParameters": {"when": "upload"},
     }
     resp = search.handler(event, None)
-    assert json.loads(resp["body"])["years"] == [2026, 2025]
+    body = json.loads(resp["body"])
+    assert body["years"] == [2026, 2025]
+    assert body["when"] == "upload"
 
 
 def test_handler_download(monkeypatch):

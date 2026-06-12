@@ -92,15 +92,20 @@ def api_get(token: str, path: str, params: dict | None = None) -> dict:
     return resp.json()
 
 
-def fetch_photos(token: str, page: int, year: str, tag: str) -> dict:
-    params: dict[str, str | int] = {"page": page, "page_size": PAGE_SIZE, "year": year}
+def fetch_photos(token: str, page: int, year: str, tag: str, when: str) -> dict:
+    params: dict[str, str | int] = {
+        "page": page,
+        "page_size": PAGE_SIZE,
+        "year": year,
+        "when": when,
+    }
     if tag.strip():
         params["label"] = tag.strip()
     return api_get(token, "/search", params)
 
 
-def fetch_years(token: str) -> list[int]:
-    data = api_get(token, "/years")
+def fetch_years(token: str, when: str) -> list[int]:
+    data = api_get(token, "/years", {"when": when})
     return data.get("years") or []
 
 
@@ -134,8 +139,14 @@ def inject_css() -> None:
 
 
 def init_browse_state() -> None:
-    # Default to current year — much faster than scanning every partition ("all").
-    defaults = {"page": 1, "year": str(datetime.now().year), "tag": "", "tag_input": ""}
+    defaults = {
+        "page": 1,
+        "year": "all",
+        "tag": "",
+        "tag_input": "",
+        # capture = EXIF date taken; upload = date added to the lake
+        "date_mode": "capture",
+    }
     for key, val in defaults.items():
         st.session_state.setdefault(key, val)
 
@@ -145,7 +156,7 @@ def reset_page() -> None:
 
 
 def _gallery_cache_key() -> tuple:
-    return (st.session_state.page, st.session_state.year, st.session_state.tag)
+    return (st.session_state.page, st.session_state.year, st.session_state.tag, st.session_state.date_mode)
 
 
 def _invalidate_gallery_cache() -> None:
@@ -153,23 +164,27 @@ def _invalidate_gallery_cache() -> None:
     st.session_state.pop("_gallery_data", None)
 
 
-def get_cached_years(token: str) -> list[int]:
-    """Fetch year list once per session (avoids ~15s Athena call every rerun)."""
-    if "cached_years" not in st.session_state:
+def get_cached_years(token: str, when: str) -> list[int]:
+    cache_key = f"cached_years_{when}"
+    if cache_key not in st.session_state:
         try:
-            st.session_state.cached_years = fetch_years(token)
+            st.session_state[cache_key] = fetch_years(token, when)
         except RuntimeError:
-            st.session_state.cached_years = list(range(datetime.now().year, datetime.now().year - 6, -1))
-    return st.session_state.cached_years
+            st.session_state[cache_key] = list(range(datetime.now().year, datetime.now().year - 6, -1))
+    return st.session_state[cache_key]
 
 
 def get_cached_photos(token: str) -> dict:
-    """Only hit /search when page, year, or tag changes — not on download clicks."""
+    """Only hit /search when page, year, tag, or date_mode changes."""
     key = _gallery_cache_key()
     if st.session_state.get("_gallery_key") != key:
         with st.spinner("Loading photos…"):
             st.session_state._gallery_data = fetch_photos(
-                token, st.session_state.page, st.session_state.year, st.session_state.tag
+                token,
+                st.session_state.page,
+                st.session_state.year,
+                st.session_state.tag,
+                st.session_state.date_mode,
             )
             st.session_state._gallery_key = key
     return st.session_state._gallery_data
@@ -200,7 +215,9 @@ def login_sidebar() -> str | None:
                     st.session_state.email = email.strip()
                     reset_page()
                     _invalidate_gallery_cache()
-                    st.session_state.pop("cached_years", None)
+                    for k in list(st.session_state.keys()):
+                        if k.startswith("cached_years_"):
+                            del st.session_state[k]
                     st.rerun()
                 except RuntimeError as exc:
                     st.error(str(exc))
@@ -210,6 +227,21 @@ def login_sidebar() -> str | None:
         if st.button("Sign out", use_container_width=True):
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
+            st.rerun()
+
+        st.divider()
+        st.markdown("**Date filter**")
+        mode_label = st.radio(
+            "Show years for",
+            ["Photo taken (EXIF)", "Date uploaded"],
+            index=0 if st.session_state.date_mode == "capture" else 1,
+            label_visibility="collapsed",
+        )
+        new_mode = "capture" if mode_label.startswith("Photo") else "upload"
+        if new_mode != st.session_state.date_mode:
+            st.session_state.date_mode = new_mode
+            reset_page()
+            _invalidate_gallery_cache()
             st.rerun()
 
         st.divider()
@@ -239,7 +271,8 @@ def login_sidebar() -> str | None:
 
 
 def year_filter_bar(token: str) -> None:
-    years = get_cached_years(token)
+    when = st.session_state.date_mode
+    years = get_cached_years(token, when)
     options = ["all"] + [str(y) for y in years]
     labels = ["All years"] + [str(y) for y in years]
     cols = st.columns(min(len(labels), 8))
@@ -368,9 +401,10 @@ def main() -> None:
     year_filter_bar(token)
 
     active_tag = st.session_state.tag
-    subtitle = "All photos"
+    when_label = "taken" if st.session_state.date_mode == "capture" else "uploaded"
+    subtitle = f"All photos ({when_label})"
     if st.session_state.year != "all":
-        subtitle = f"Photos from {st.session_state.year}"
+        subtitle = f"Photos {when_label} in {st.session_state.year}"
     if active_tag:
         subtitle += f' tagged "{active_tag}"'
     st.markdown(f"**{subtitle}** · page {st.session_state.page}")
