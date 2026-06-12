@@ -1,0 +1,86 @@
+{
+  "Comment": "Nightly media agent: cluster faces, propose albums with Claude (Bedrock), email proposals for approval. ${AlbumAgentArn} and ${ApprovalTopicArn} are injected by Terraform templatefile().",
+  "StartAt": "ClusterFaces",
+  "States": {
+    "ClusterFaces": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${AlbumAgentArn}",
+        "Payload": {
+          "action": "cluster_faces"
+        }
+      },
+      "ResultSelector": {
+        "result.$": "$.Payload"
+      },
+      "ResultPath": "$.cluster",
+      "TimeoutSeconds": 660,
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.TooManyRequestsException",
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 10,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Next": "ProposeAlbums"
+    },
+    "ProposeAlbums": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${AlbumAgentArn}",
+        "Payload": {
+          "action": "propose_albums"
+        }
+      },
+      "ResultSelector": {
+        "result.$": "$.Payload"
+      },
+      "ResultPath": "$.propose",
+      "TimeoutSeconds": 660,
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.TooManyRequestsException",
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Next": "AnyProposals"
+    },
+    "AnyProposals": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.propose.result.albums",
+          "NumericGreaterThan": 0,
+          "Next": "NotifyForApproval"
+        }
+      ],
+      "Default": "NothingToPropose"
+    },
+    "NotifyForApproval": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "${ApprovalTopicArn}",
+        "Subject": "Family Media Lake: new album proposals await review",
+        "Message.$": "$.propose.result.summary"
+      },
+      "End": true
+    },
+    "NothingToPropose": {
+      "Type": "Succeed"
+    }
+  }
+}

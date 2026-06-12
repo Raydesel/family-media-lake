@@ -1,0 +1,3 @@
+# Copy to terraform.tfvars (gitignored) and customize.
+approval_email         = "you@example.com"
+agent_schedule_enabled = false

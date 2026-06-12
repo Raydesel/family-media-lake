@@ -1,0 +1,8 @@
+# upload_trigger runtime dependencies.
+#
+# Phase 1 uses only boto3, which is already bundled in the AWS Lambda
+# python3.11 runtime, so nothing needs to be installed/packaged here.
+# Listed for documentation + local testing parity.
+#
+# boto3 is provided by the Lambda runtime; install locally for tests:
+#   boto3>=1.34

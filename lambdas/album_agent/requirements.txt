@@ -1,0 +1,4 @@
+# album_agent runtime dependencies, installed for linux/arm64 + python3.11 by
+# scripts/build_lambda_package.sh (invoked from Terraform).
+# boto3 (incl. bedrock-runtime) is provided by the Lambda runtime.
+pyarrow>=16

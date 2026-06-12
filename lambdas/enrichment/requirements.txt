@@ -1,0 +1,5 @@
+# enrichment runtime dependencies, installed for linux/arm64 + python3.11 by
+# scripts/build_lambda_package.sh (invoked from Terraform).
+# boto3 itself is provided by the Lambda runtime.
+Pillow>=10.0
+pyarrow>=16
