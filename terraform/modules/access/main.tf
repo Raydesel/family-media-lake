@@ -220,6 +220,18 @@ data "aws_iam_policy_document" "search_api" {
       "${var.processed_bucket_arn}/metadata/*",
     ]
   }
+
+  statement {
+    sid       = "PresignRawDownloads"
+    actions   = ["s3:GetObject"]
+    resources = ["${var.raw_bucket_arn}/*"]
+  }
+
+  statement {
+    sid       = "ReadCatalog"
+    actions   = ["dynamodb:GetItem", "dynamodb:Scan"]
+    resources = [var.catalog_table_arn]
+  }
 }
 
 resource "aws_iam_role_policy" "search_api" {
@@ -264,9 +276,12 @@ resource "aws_lambda_function" "search_api" {
       GLUE_TABLE        = var.glue_table_name
       ATHENA_WORKGROUP  = var.athena_workgroup_name
       CLOUDFRONT_DOMAIN = aws_cloudfront_distribution.thumbnails.domain_name
+      RAW_BUCKET        = var.raw_bucket_name
+      CATALOG_TABLE     = var.catalog_table_name
+      BROWSE_BACKEND    = "dynamodb"
       QUERY_TIMEOUT_SEC = "25"
-      DEFAULT_LIMIT     = "50"
-      MAX_LIMIT         = "100"
+      DEFAULT_PAGE_SIZE = "20"
+      MAX_PAGE_SIZE     = "20"
       LOG_LEVEL         = "INFO"
     }
   }
@@ -321,6 +336,22 @@ resource "aws_apigatewayv2_route" "health" {
 resource "aws_apigatewayv2_route" "search" {
   api_id             = aws_apigatewayv2_api.search.id
   route_key          = "GET /search"
+  target             = "integrations/${aws_apigatewayv2_integration.search_lambda.id}"
+  authorizer_id      = aws_apigatewayv2_authorizer.cognito.id
+  authorization_type = "JWT"
+}
+
+resource "aws_apigatewayv2_route" "years" {
+  api_id             = aws_apigatewayv2_api.search.id
+  route_key          = "GET /years"
+  target             = "integrations/${aws_apigatewayv2_integration.search_lambda.id}"
+  authorizer_id      = aws_apigatewayv2_authorizer.cognito.id
+  authorization_type = "JWT"
+}
+
+resource "aws_apigatewayv2_route" "download" {
+  api_id             = aws_apigatewayv2_api.search.id
+  route_key          = "GET /download"
   target             = "integrations/${aws_apigatewayv2_integration.search_lambda.id}"
   authorizer_id      = aws_apigatewayv2_authorizer.cognito.id
   authorization_type = "JWT"

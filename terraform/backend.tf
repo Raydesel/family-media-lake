@@ -20,7 +20,7 @@
 
 terraform {
   backend "s3" {
-    bucket         = "family-media-tfstate-REPLACE_WITH_ACCOUNT_ID"
+    bucket         = "family-media-tfstate-997599126378"
     key            = "family-media/terraform.tfstate"
     region         = "us-east-1"
     dynamodb_table = "family-media-tflock"

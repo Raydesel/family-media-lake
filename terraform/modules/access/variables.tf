@@ -23,6 +23,26 @@ variable "processed_bucket_arn" {
   type        = string
 }
 
+variable "raw_bucket_name" {
+  description = "Raw uploads bucket (presigned download URLs)."
+  type        = string
+}
+
+variable "raw_bucket_arn" {
+  description = "ARN of the raw uploads bucket."
+  type        = string
+}
+
+variable "catalog_table_name" {
+  description = "DynamoDB media catalog (fast browse path for the search API)."
+  type        = string
+}
+
+variable "catalog_table_arn" {
+  description = "ARN of the DynamoDB catalog table."
+  type        = string
+}
+
 variable "glue_database_name" {
   description = "Glue database searched by the API Lambda."
   type        = string

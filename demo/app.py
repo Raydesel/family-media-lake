@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
-"""Streamlit demo UI for the Family Media Data Lake (Phase 4).
+"""Family Media Lake — Instagram-style browse UI (Phase 4).
 
-Configure via environment variables (or a local .env you do not commit):
+Photos load automatically when you sign in (20 per page). Tap a year to filter,
+optionally search by tag, swipe through pages, and download originals.
 
-  SEARCH_API_URL      terraform output search_api_endpoint
-  COGNITO_CLIENT_ID   terraform output cognito_client_id
-  AWS_REGION          default us-east-1
+Environment:
+  SEARCH_API_URL, COGNITO_CLIENT_ID, AWS_REGION (default us-east-1)
 
 Run:
-
   pip install -r demo/requirements.txt
   streamlit run demo/app.py
 """
 from __future__ import annotations
 
+import logging
 import os
+import sys
+from datetime import datetime
 
 import boto3
 import requests
@@ -24,6 +26,16 @@ from botocore.exceptions import ClientError
 API_URL = os.environ.get("SEARCH_API_URL", "").rstrip("/")
 CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID", "")
 REGION = os.environ.get("AWS_REGION", "us-east-1")
+PAGE_SIZE = 20
+DEBUG = os.environ.get("STREAMLIT_DEBUG", "").lower() in ("1", "true", "yes")
+
+# Logs go to the terminal where you ran `streamlit run` (stdout/stderr).
+logging.basicConfig(
+    level=logging.DEBUG if DEBUG else logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    stream=sys.stderr,
+)
+log = logging.getLogger("family-photos")
 
 
 def cognito_login(email: str, password: str) -> str:
@@ -36,109 +48,352 @@ def cognito_login(email: str, password: str) -> str:
         )
     except ClientError as exc:
         code = exc.response.get("Error", {}).get("Code", "AuthError")
-        raise RuntimeError(f"login failed ({code})") from exc
-    return resp["AuthenticationResult"]["IdToken"]
+        log.error("Cognito login failed: %s", code)
+        raise RuntimeError(f"Could not sign in ({code}). Check email and password.") from exc
+
+    if "AuthenticationResult" in resp:
+        log.info("Cognito login OK for %s", email)
+        return resp["AuthenticationResult"]["IdToken"]
+
+    # Admin-created users with a temporary password hit this challenge first.
+    challenge = resp.get("ChallengeName", "unknown")
+    log.warning("Cognito challenge instead of token: %s", challenge)
+    if challenge == "NEW_PASSWORD_REQUIRED":
+        raise RuntimeError(
+            "Your account still needs a permanent password. Run:\n"
+            f"  aws cognito-idp admin-set-user-password --user-pool-id <pool> "
+            f"--username {email!r} --password 'YourSecurePass1!' --permanent"
+        )
+    raise RuntimeError(f"Sign-in requires extra step ({challenge}). Contact the admin.")
 
 
-def search(token: str, params: dict) -> dict:
+def api_get(token: str, path: str, params: dict | None = None) -> dict:
     if not API_URL:
         raise RuntimeError("SEARCH_API_URL is not set")
+    url = f"{API_URL}{path}"
+    log.info("GET %s params=%s", url, params)
     resp = requests.get(
-        f"{API_URL}/search",
-        params=params,
+        url,
+        params=params or {},
         headers={"Authorization": f"Bearer {token}"},
-        timeout=35,
+        timeout=40,
     )
+    log.info("→ %s %s", resp.status_code, resp.url)
+    if DEBUG:
+        log.debug("response body: %s", resp.text[:500])
     if resp.status_code != 200:
         try:
-            detail = resp.json().get("message") or resp.json().get("error")
+            body = resp.json()
+            detail = body.get("message") or body.get("error")
         except Exception:
-            detail = resp.text
-        raise RuntimeError(f"search failed ({resp.status_code}): {detail}")
+            detail = resp.text[:200]
+        log.error("API error %s: %s", resp.status_code, detail)
+        raise RuntimeError(detail or f"Request failed ({resp.status_code})")
     return resp.json()
 
 
+def fetch_photos(token: str, page: int, year: str, tag: str) -> dict:
+    params: dict[str, str | int] = {"page": page, "page_size": PAGE_SIZE, "year": year}
+    if tag.strip():
+        params["label"] = tag.strip()
+    return api_get(token, "/search", params)
+
+
+def fetch_years(token: str) -> list[int]:
+    data = api_get(token, "/years")
+    return data.get("years") or []
+
+
+def fetch_download_url(token: str, file_id: str) -> dict:
+    return api_get(token, "/download", {"file_id": file_id})
+
+
+# --- UI styling --------------------------------------------------------------
+
+def inject_css() -> None:
+    st.markdown(
+        """
+        <style>
+        #MainMenu, footer, header {visibility: hidden;}
+        .block-container {padding-top: 0.5rem; max-width: 935px;}
+        .ig-title {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            font-size: 1.35rem; font-weight: 600; text-align: center;
+            padding: 0.6rem 0 0.8rem; margin-bottom: 0.5rem;
+            border-bottom: 1px solid #dbdbdb;
+        }
+        .ig-sub {text-align: center; color: #8e8e8e; font-size: 0.9rem; margin-bottom: 1rem;}
+        div[data-testid="stHorizontalBlock"] button[kind="primary"] {
+            background: linear-gradient(45deg, #f09433, #e6683c, #dc2743, #cc2366, #bc1888) !important;
+            border: none !important; color: white !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def init_browse_state() -> None:
+    # Default to current year — much faster than scanning every partition ("all").
+    defaults = {"page": 1, "year": str(datetime.now().year), "tag": "", "tag_input": ""}
+    for key, val in defaults.items():
+        st.session_state.setdefault(key, val)
+
+
+def reset_page() -> None:
+    st.session_state.page = 1
+
+
+def _gallery_cache_key() -> tuple:
+    return (st.session_state.page, st.session_state.year, st.session_state.tag)
+
+
+def _invalidate_gallery_cache() -> None:
+    st.session_state.pop("_gallery_key", None)
+    st.session_state.pop("_gallery_data", None)
+
+
+def get_cached_years(token: str) -> list[int]:
+    """Fetch year list once per session (avoids ~15s Athena call every rerun)."""
+    if "cached_years" not in st.session_state:
+        try:
+            st.session_state.cached_years = fetch_years(token)
+        except RuntimeError:
+            st.session_state.cached_years = list(range(datetime.now().year, datetime.now().year - 6, -1))
+    return st.session_state.cached_years
+
+
+def get_cached_photos(token: str) -> dict:
+    """Only hit /search when page, year, or tag changes — not on download clicks."""
+    key = _gallery_cache_key()
+    if st.session_state.get("_gallery_key") != key:
+        with st.spinner("Loading photos…"):
+            st.session_state._gallery_data = fetch_photos(
+                token, st.session_state.page, st.session_state.year, st.session_state.tag
+            )
+            st.session_state._gallery_key = key
+    return st.session_state._gallery_data
+
+
+def _prepare_download(file_id: str) -> None:
+    """Button callback: fetch presigned URL without reloading the photo grid."""
+    try:
+        st.session_state[f"download_{file_id}"] = fetch_download_url(st.session_state.token, file_id)
+        st.session_state.pop("_download_error", None)
+    except RuntimeError as exc:
+        st.session_state["_download_error"] = str(exc)
+
+
+# --- Components --------------------------------------------------------------
+
+def login_sidebar() -> str | None:
+    with st.sidebar:
+        st.markdown("### Family Photos")
+        st.caption("Sign in with your family account")
+
+        if not st.session_state.get("token"):
+            email = st.text_input("Email", key="login_email")
+            password = st.text_input("Password", type="password", key="login_password")
+            if st.button("Log in", type="primary", use_container_width=True):
+                try:
+                    st.session_state.token = cognito_login(email.strip(), password)
+                    st.session_state.email = email.strip()
+                    reset_page()
+                    _invalidate_gallery_cache()
+                    st.session_state.pop("cached_years", None)
+                    st.rerun()
+                except RuntimeError as exc:
+                    st.error(str(exc))
+            return None
+
+        st.success(f"Hi, {st.session_state.get('email', 'family')}!")
+        if st.button("Sign out", use_container_width=True):
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
+            st.rerun()
+
+        st.divider()
+        st.markdown("**Search by tag**")
+        st.caption("Examples: Beach, Dog, Birthday")
+        tag_input = st.text_input("Tag", value=st.session_state.tag_input, label_visibility="collapsed")
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("Apply", use_container_width=True):
+                st.session_state.tag = tag_input.strip()
+                st.session_state.tag_input = tag_input
+                reset_page()
+                _invalidate_gallery_cache()
+                st.rerun()
+        with c2:
+            if st.button("Clear", use_container_width=True):
+                st.session_state.tag = ""
+                st.session_state.tag_input = ""
+                reset_page()
+                _invalidate_gallery_cache()
+                st.rerun()
+
+        if st.session_state.tag:
+            st.info(f"Showing: **{st.session_state.tag}**")
+
+        return st.session_state.token
+
+
+def year_filter_bar(token: str) -> None:
+    years = get_cached_years(token)
+    options = ["all"] + [str(y) for y in years]
+    labels = ["All years"] + [str(y) for y in years]
+    cols = st.columns(min(len(labels), 8))
+    for i, (opt, label) in enumerate(zip(options, labels)):
+        with cols[i % len(cols)]:
+            selected = st.session_state.year == opt
+            if st.button(
+                label,
+                key=f"year_{opt}",
+                type="primary" if selected else "secondary",
+                use_container_width=True,
+            ):
+                st.session_state.year = opt
+                reset_page()
+                _invalidate_gallery_cache()
+                st.rerun()
+
+
+def format_date(item: dict) -> str:
+    for key in ("capture_ts", "upload_ts"):
+        val = item.get(key)
+        if val:
+            return str(val)[:10]
+    return ""
+
+
+def photo_card(token: str, item: dict, col) -> None:
+    file_id = item.get("file_id", "")
+    with col:
+        url = item.get("thumbnail_url")
+        if url:
+            st.image(url, use_container_width=True)
+        else:
+            st.container(border=True).write("No preview")
+
+        name = item.get("original_filename") or file_id[:8]
+        when = format_date(item)
+        st.caption(f"**{name}**" + (f" · {when}" if when else ""))
+
+        labels = item.get("rekognition_labels") or []
+        if labels:
+            tag_cols = st.columns(min(3, len(labels[:3])))
+            for j, lbl in enumerate(labels[:3]):
+                with tag_cols[j]:
+                    if st.button(lbl, key=f"tag_{file_id}_{lbl}", use_container_width=True):
+                        st.session_state.tag = lbl
+                        st.session_state.tag_input = lbl
+                        reset_page()
+                        _invalidate_gallery_cache()
+                        st.rerun()
+
+        dl_key = f"download_{file_id}"
+        dl = st.session_state.get(dl_key)
+        if dl and dl.get("download_url"):
+            # One tap: opens presigned URL (S3 sends Content-Disposition: attachment).
+            st.link_button(
+                "⬇ Save original",
+                dl["download_url"],
+                use_container_width=True,
+                help=f"Save {dl.get('filename', 'photo')}",
+            )
+        else:
+            st.button(
+                "⬇ Save original",
+                key=f"btn_{file_id}",
+                use_container_width=True,
+                on_click=_prepare_download,
+                args=(file_id,),
+                help="Prepares a secure download link (~10s)",
+            )
+
+
+def pagination_bar(has_more: bool) -> None:
+    page = st.session_state.page
+    st.divider()
+    prev_col, mid_col, next_col = st.columns([1, 2, 1])
+    with prev_col:
+        if page > 1:
+            if st.button("← Previous", use_container_width=True):
+                st.session_state.page = page - 1
+                _invalidate_gallery_cache()
+                st.rerun()
+    with mid_col:
+        st.markdown(f"<p style='text-align:center;margin-top:0.5rem;'>Page <b>{page}</b></p>", unsafe_allow_html=True)
+    with next_col:
+        if has_more:
+            if st.button("Next →", use_container_width=True):
+                st.session_state.page = page + 1
+                _invalidate_gallery_cache()
+                st.rerun()
+
+
+def photo_grid(token: str, results: list[dict]) -> None:
+    cols = st.columns(3)
+    for i, item in enumerate(results):
+        photo_card(token, item, cols[i % 3])
+
+
+# --- Main --------------------------------------------------------------------
+
 def main() -> None:
-    st.set_page_config(page_title="Family Media Lake", page_icon="📷", layout="wide")
-    st.title("Family Media Lake")
-    st.caption("Athena-backed search with CloudFront thumbnails")
+    st.set_page_config(page_title="Family Photos", page_icon="📷", layout="wide", initial_sidebar_state="expanded")
+    inject_css()
+    init_browse_state()
+
+    st.markdown('<div class="ig-title">📷 Family Photos</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="ig-sub">Browse your memories — pick a year or search a tag</div>',
+        unsafe_allow_html=True,
+    )
 
     if not CLIENT_ID:
         st.error("Set COGNITO_CLIENT_ID (terraform output cognito_client_id).")
         st.stop()
+    if not API_URL:
+        st.error("Set SEARCH_API_URL (terraform output search_api_endpoint).")
+        st.stop()
+    if DEBUG:
+        st.sidebar.caption("🔧 Debug logging ON → watch the terminal")
 
-    with st.sidebar:
-        st.header("Sign in")
-        email = st.text_input("Email")
-        password = st.text_input("Password", type="password")
-        if st.button("Log in", type="primary"):
-            try:
-                st.session_state["token"] = cognito_login(email.strip(), password)
-                st.session_state["email"] = email.strip()
-                st.success("Signed in")
-            except RuntimeError as exc:
-                st.error(str(exc))
-
-        if st.session_state.get("token"):
-            st.write(f"Signed in as **{st.session_state.get('email', '')}**")
-            if st.button("Sign out"):
-                st.session_state.pop("token", None)
-                st.session_state.pop("email", None)
-                st.rerun()
-
-    token = st.session_state.get("token")
+    token = login_sidebar()
     if not token:
-        st.info("Sign in with a Cognito family account to search.")
+        st.info("👋 Sign in on the left to see your photos.")
         st.stop()
 
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        year = st.number_input("Year", min_value=2000, max_value=2035, value=2026)
-    with col2:
-        month = st.number_input("Month (0 = any)", min_value=0, max_value=12, value=0)
-    with col3:
-        day = st.number_input("Day (0 = any)", min_value=0, max_value=31, value=0)
+    year_filter_bar(token)
 
-    label = st.text_input("Label contains (Rekognition)", placeholder="Beach")
-    uploader = st.text_input("Uploader", placeholder="ariel")
-    media_type = st.selectbox("Media type", ["", "photo", "video"])
+    active_tag = st.session_state.tag
+    subtitle = "All photos"
+    if st.session_state.year != "all":
+        subtitle = f"Photos from {st.session_state.year}"
+    if active_tag:
+        subtitle += f' tagged "{active_tag}"'
+    st.markdown(f"**{subtitle}** · page {st.session_state.page}")
 
-    if st.button("Search", type="primary"):
-        params: dict[str, str | int] = {"year": int(year), "limit": 48}
-        if month:
-            params["month"] = int(month)
-        if day:
-            params["day"] = int(day)
-        if label.strip():
-            params["label"] = label.strip()
-        if uploader.strip():
-            params["uploader"] = uploader.strip()
-        if media_type:
-            params["media_type"] = media_type
+    if err := st.session_state.pop("_download_error", None):
+        st.error(f"Download failed: {err}")
 
-        try:
-            with st.spinner("Querying Athena…"):
-                data = search(token, params)
-        except RuntimeError as exc:
-            st.error(str(exc))
-            st.stop()
+    try:
+        data = get_cached_photos(token)
+    except RuntimeError as exc:
+        st.error(str(exc))
+        st.stop()
 
-        results = data.get("results") or []
-        st.subheader(f"{data.get('count', 0)} result(s)")
-        if not results:
-            st.write("No matches. Try widening year/month or removing filters.")
-            st.stop()
+    results = data.get("results") or []
+    if not results:
+        st.warning("No photos here yet. Try **All years** or clear the tag filter.")
+        if st.session_state.page > 1:
+            st.session_state.page = 1
+            st.rerun()
+        st.stop()
 
-        cols = st.columns(4)
-        for i, item in enumerate(results):
-            with cols[i % 4]:
-                url = item.get("thumbnail_url")
-                if url:
-                    st.image(url, use_container_width=True)
-                st.caption(item.get("original_filename", item.get("file_id", "")))
-                labels = item.get("rekognition_labels") or []
-                if labels:
-                    st.write(", ".join(labels[:4]))
+    photo_grid(token, results)
+    pagination_bar(bool(data.get("has_more")))
 
 
 if __name__ == "__main__":

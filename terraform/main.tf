@@ -88,6 +88,10 @@ module "access" {
   account_id            = local.account_id
   processed_bucket_name = module.storage.processed_bucket_name
   processed_bucket_arn  = module.storage.processed_bucket_arn
+  raw_bucket_name       = module.storage.raw_bucket_name
+  raw_bucket_arn        = module.storage.raw_bucket_arn
+  catalog_table_name    = module.storage.catalog_table_name
+  catalog_table_arn     = module.storage.catalog_table_arn
   glue_database_name    = module.enrichment.glue_database_name
   glue_table_name       = module.enrichment.glue_table_name
   athena_workgroup_name = module.enrichment.athena_workgroup_name

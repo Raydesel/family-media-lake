@@ -277,7 +277,11 @@ curl -s -H "Authorization: Bearer $TOKEN" \
   "$API/search?year=2026&month=6&label=Person" | jq .
 ```
 
-### Streamlit demo
+### Streamlit demo (family-friendly browse UI)
+
+Instagram-style grid: photos load on sign-in (20 per page), **year buttons** at the
+top, optional **tag search** in the sidebar, **Previous / Next** pagination, and
+**Download original** per photo (presigned URL from the API).
 
 ```bash
 export SEARCH_API_URL="$(terraform -chdir=terraform output -raw search_api_endpoint)"
@@ -285,6 +289,8 @@ export COGNITO_CLIENT_ID="$(terraform -chdir=terraform output -raw cognito_clien
 pip install -r demo/requirements.txt
 streamlit run demo/app.py
 ```
+
+API routes: `GET /search?page=1&year=all`, `GET /years`, `GET /download?file_id=…`
 
 See `demo/README.md` for details.
 
