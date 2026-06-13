@@ -9,7 +9,10 @@ export SEARCH_API_URL="$(terraform -chdir=terraform output -raw search_api_endpo
 export COGNITO_CLIENT_ID="$(terraform -chdir=terraform output -raw cognito_client_id)"
 export AWS_REGION=us-east-1
 
-# Option B: copy demo/.streamlit/secrets.toml.example → secrets.toml (gitignored)
+# Option B: copy repo-root Streamlit secrets (used by `streamlit run demo/app.py`)
+
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml
+# edit .streamlit/secrets.toml with terraform outputs + IAM keys for Cognito login
 
 pip install -r demo/requirements.txt
 streamlit run demo/app.py
@@ -17,6 +20,14 @@ streamlit run demo/app.py
 
 **Streamlit Community Cloud:** paste the same keys into the app Secrets UI.
 Never commit `secrets.toml`, API URLs, or AWS keys.
+
+**Stay signed in:** after login, the Cognito refresh token is saved in the
+browser's **localStorage** (~30 days, per Cognito). Reloading or reopening the
+app restores the session automatically. Use **Sign out** on shared devices.
+
+```bash
+pip install -r demo/requirements.txt
+```
 
 ### Seeing logs / debugging
 

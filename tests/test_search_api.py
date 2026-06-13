@@ -186,9 +186,12 @@ def test_catalog_search_pagination(monkeypatch):
     monkeypatch.setattr(search, "_scan_enriched_catalog", lambda: items)
     page1 = search.catalog_search({"year": "2026", "page": "1", "page_size": "20"})
     assert page1["count"] == 20
+    assert page1["total_count"] == 25
+    assert page1["total_pages"] == 2
     assert page1["has_more"] is True
     page2 = search.catalog_search({"year": "2026", "page": "2", "page_size": "20"})
     assert page2["count"] == 5
+    assert page2["total_pages"] == 2
     assert page2["has_more"] is False
 
 

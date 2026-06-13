@@ -42,11 +42,4 @@ terraform/*.auto.tfvars
 terraform/backend.hcl
 demo/.streamlit/secrets.toml
 .streamlit/secrets.toml
-
-# AWS / keys (never commit)
-*.pem
-credentials
-.aws/credentials
-
-# Streamlit
-.streamlit/secrets.toml
+/secrets.toml

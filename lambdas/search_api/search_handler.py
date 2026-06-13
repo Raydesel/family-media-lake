@@ -249,6 +249,11 @@ def build_file_lookup_query(file_id: str) -> str:
     )
 
 
+def build_count_query(params: dict[str, str | None]) -> str:
+    where = " AND ".join(_filter_clauses(params))
+    return f"SELECT COUNT(*) AS total FROM {_glue_table()} WHERE {where}"
+
+
 # --- Athena execution ----------------------------------------------------------
 
 def _rows_from_results(result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -431,6 +436,11 @@ def catalog_search(params: dict[str, str | None]) -> dict[str, Any]:
     matched = [i for i in _scan_enriched_catalog() if _catalog_matches(i, params)]
     matched.sort(key=_catalog_sort_key, reverse=True)
 
+    total_count = len(matched)
+    total_pages = max(1, (total_count + page_size - 1) // page_size) if total_count else 0
+    if total_count and page > total_pages:
+        page = total_pages
+
     offset = (page - 1) * page_size
     slice_ = matched[offset : offset + page_size + 1]
     has_more = len(slice_) > page_size
@@ -439,6 +449,8 @@ def catalog_search(params: dict[str, str | None]) -> dict[str, Any]:
         "page": page,
         "page_size": page_size,
         "count": len(rows),
+        "total_count": total_count,
+        "total_pages": total_pages,
         "has_more": has_more,
         "results": rows,
         "source": "dynamodb",
@@ -500,6 +512,13 @@ def search(params: dict[str, str | None]) -> dict[str, Any]:
         return catalog_search(params)
 
     sql, page, page_size = build_search_query(params)
+    count_rows = run_athena_query(build_count_query(params))
+    total_count = int(count_rows[0].get("total", 0)) if count_rows else 0
+    total_pages = max(1, (total_count + page_size - 1) // page_size) if total_count else 0
+    if total_count and page > total_pages:
+        page = total_pages
+        sql, page, page_size = build_search_query({**params, "page": str(page)})
+
     rows = enrich_rows(run_athena_query(sql))
     has_more = len(rows) > page_size
     if has_more:
@@ -508,6 +527,8 @@ def search(params: dict[str, str | None]) -> dict[str, Any]:
         "page": page,
         "page_size": page_size,
         "count": len(rows),
+        "total_count": total_count,
+        "total_pages": total_pages,
         "has_more": has_more,
         "results": rows,
         "source": "athena",
