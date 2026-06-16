@@ -43,3 +43,6 @@ terraform/backend.hcl
 demo/.streamlit/secrets.toml
 .streamlit/secrets.toml
 /secrets.toml
+
+.bulk_upload_log_path
+bulk_upload_*.log
